@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Team HR</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#171b22; --ink:#f2f4f7; --muted:#8b95a5; --line:#262c36;
+    --z1:#5b6b80; --z2:#2f80ed; --z3:#27ae60; --z4:#f2994a; --z5:#eb5757;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.3 -apple-system,system-ui,sans-serif;-webkit-user-select:none;user-select:none}
+  header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+  h1{font-size:20px;margin:0 auto 0 0}
+  #clock{font-variant-numeric:tabular-nums;color:var(--muted);font-size:18px}
+  button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:12px 16px;background:#2a3140;color:var(--ink)}
+  button.primary{background:#2f80ed}
+  button.rec{background:#27ae60} button.rec.on{background:#eb5757}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;padding:16px}
+  .tile{background:var(--panel);border-radius:16px;padding:12px 14px;border-left:10px solid var(--z1);position:relative}
+  .tile.lost{opacity:.45}
+  .name{font-size:18px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:28px}
+  .bpm{font-size:64px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1;margin:6px 0}
+  .bpm small{font-size:16px;color:var(--muted);font-weight:600}
+  .meta{display:flex;justify-content:space-between;color:var(--muted);font-size:14px}
+  .edit{position:absolute;top:8px;right:8px;background:none;padding:6px;color:var(--muted)}
+  .empty{color:var(--muted);text-align:center;padding:60px 20px;grid-column:1/-1}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;padding:0 16px 16px;color:var(--muted);font-size:13px}
+  .legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;background:var(--c)}
+  dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:14px;width:min(420px,92vw)}
+  dialog input,dialog textarea{width:100%;font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin:6px 0 12px;-webkit-user-select:text;user-select:text}
+  dialog textarea{height:200px;font-size:12px}
+  .row{display:flex;gap:8px;justify-content:flex-end}
+</style>
+</head>
+<body>
+<header>
+  <h1>Team HR</h1>
+  <span id="clock">00:00</span>
+  <button class="primary" id="add">+ Add armband</button>
+  <button class="rec" id="rec">Start session</button>
+  <button id="export">Export</button>
+</header>
+
+<div id="grid"><div class="empty">Tap <b>+ Add armband</b>, then pick a Coospo from the list. One tap per player.<br><br>Players' armbands must <b>not</b> be connected to their own phone or the Coospo app — each armband allows only one Bluetooth connection.</div></div>
+
+<div class="legend">
+  <span style="--c:var(--z1)">&lt;60% easy</span>
+  <span style="--c:var(--z2)">60–70%</span>
+  <span style="--c:var(--z3)">70–80%</span>
+  <span style="--c:var(--z4)">80–90%</span>
+  <span style="--c:var(--z5)">90%+ max</span>
+</div>
+
+<dialog id="dlgEdit">
+  <form method="dialog">
+    <label>Player name<input id="eName"></label>
+    <label>Max HR (default 200)<input id="eMax" type="number" inputmode="numeric"></label>
+    <div class="row"><button value="remove" id="eRemove">Remove</button><button value="cancel">Cancel</button><button class="primary" value="save">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlgExport">
+  <form method="dialog">
+    <p style="margin-top:0">Session summary (CSV). Copy it and paste into Google Sheets.</p>
+    <textarea id="csv" readonly></textarea>
+    <div class="row"><button type="button" id="copy">Copy</button><button class="primary" value="close">Done</button></div>
+  </form>
+</dialog>
+
+<script>
+const ZONES = [0.6, 0.7, 0.8, 0.9];          // % of max HR boundaries
+const ZCOL = ['--z1','--z2','--z3','--z4','--z5'];
+const players = new Map();                  // device.id -> state
+let session = null;                         // {start, timer}
+let editing = null;
+
+// Saved names/max HR per armband (best effort; storage may be unavailable)
+function loadSaved(){ try{return JSON.parse(localStorage.getItem('hrRoster')||'{}')}catch(e){return {}} }
+function save(){
+  try{
+    const o = loadSaved();
+    players.forEach((p,id)=>{ o[id]={name:p.name,max:p.max} });
+    localStorage.setItem('hrRoster', JSON.stringify(o));
+  }catch(e){}
+}
+
+function zoneOf(bpm,max){ const r=bpm/max; let z=0; ZONES.forEach(b=>{ if(r>=b) z++ }); return z; }
+
+function parseHR(dv){
+  const flags = dv.getUint8(0);
+  return (flags & 1) ? dv.getUint16(1, true) : dv.getUint8(1);
+}
+
+document.getElementById('add').onclick = async () => {
+  if(!navigator.bluetooth){ alert('This browser has no Bluetooth. On iPad, open this page in the Bluefy app.'); return; }
+  try{
+    const device = await navigator.bluetooth.requestDevice({ filters:[{ services:['heart_rate'] }] });
+    if(players.has(device.id)){ connect(players.get(device.id)); return; }
+    const saved = loadSaved()[device.id] || {};
+    const p = { id:device.id, device, name: saved.name || device.name || 'Player', max: saved.max || 200,
+                bpm:null, last:0, peak:0, sum:0, n:0, zoneSec:[0,0,0,0,0], el:null };
+    players.set(device.id, p);
+    device.addEventListener('gattserverdisconnected', () => { p.connected=false; render(p); setTimeout(()=>connect(p), 1500); });
+    makeTile(p);
+    await connect(p);
+    if(!saved.name) openEdit(p);   // name them right away the first time
+  }catch(e){ if(e.name!=='NotFoundError') alert('Could not connect: '+e.message); }
+};
+
+async function connect(p){
+  if(!players.has(p.id) || p.device.gatt.connected) return;
+  try{
+    const server = await p.device.gatt.connect();
+    const svc = await server.getPrimaryService('heart_rate');
+    const ch = await svc.getCharacteristic('heart_rate_measurement');
+    ch.addEventListener('characteristicvaluechanged', ev => {
+      p.bpm = parseHR(ev.target.value); p.last = Date.now(); render(p);
+    });
+    await ch.startNotifications();
+    p.connected = true; render(p);
+  }catch(e){ p.connected=false; render(p); setTimeout(()=>connect(p), 3000); }
+}
+
+function makeTile(p){
+  document.querySelector('.empty')?.remove();
+  const el = document.createElement('div');
+  el.className='tile';
+  el.innerHTML = `<div class="name"></div><button class="edit" aria-label="Edit">✎</button>
+    <div class="bpm">--<small> bpm</small></div><div class="meta"><span class="pct"></span><span class="pk"></span></div>`;
+  el.querySelector('.edit').onclick = () => openEdit(p);
+  document.getElementById('grid').appendChild(el);
+  p.el = el; render(p);
+}
+
+function render(p){
+  if(!p.el) return;
+  const fresh = p.connected && Date.now()-p.last < 5000 && p.bpm;
+  p.el.classList.toggle('lost', !fresh);
+  p.el.querySelector('.name').textContent = p.name;
+  p.el.querySelector('.bpm').firstChild.textContent = fresh ? p.bpm : '--';
+  const z = fresh ? zoneOf(p.bpm,p.max) : 0;
+  p.el.style.borderLeftColor = `var(${ZCOL[z]})`;
+  p.el.querySelector('.pct').textContent = fresh ? Math.round(100*p.bpm/p.max)+'%' : (p.connected?'waiting…':'reconnecting…');
+  p.el.querySelector('.pk').textContent = session ? 'peak '+(p.peak||'--') : '';
+}
+
+// Once-per-second tick: stale check + session stats
+setInterval(() => {
+  players.forEach(p => {
+    const fresh = p.connected && Date.now()-p.last < 5000 && p.bpm;
+    if(session && fresh){
+      p.sum += p.bpm; p.n++; p.peak = Math.max(p.peak, p.bpm);
+      p.zoneSec[zoneOf(p.bpm,p.max)]++;
+    }
+    render(p);
+  });
+  if(session){
+    const s = Math.floor((Date.now()-session.start)/1000);
+    document.getElementById('clock').textContent = String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+  }
+}, 1000);
+
+document.getElementById('rec').onclick = e => {
+  const b = e.currentTarget;
+  if(!session){
+    players.forEach(p=>{ p.sum=0;p.n=0;p.peak=0;p.zoneSec=[0,0,0,0,0]; });
+    session = { start: Date.now() };
+    b.textContent='End session'; b.classList.add('on');
+  }else{
+    session.end = Date.now(); showExport(); session = null;
+    b.textContent='Start session'; b.classList.remove('on');
+  }
+};
+
+function mmss(s){ return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+function buildCSV(){
+  const date = new Date().toLocaleDateString();
+  const rows = [['Date','Player','Avg HR','Peak HR','Max HR set','Min <60%','Min 60-70%','Min 70-80%','Min 80-90%','Min 90%+']];
+  players.forEach(p => rows.push([date, p.name, p.n?Math.round(p.sum/p.n):'', p.peak||'', p.max, ...p.zoneSec.map(s=>(s/60).toFixed(1))]));
+  return rows.map(r=>r.map(c=>/[",]/.test(c)?`"${String(c).replace(/"/g,'""')}"`:c).join(',')).join('\n');
+}
+function showExport(){ document.getElementById('csv').value = buildCSV(); document.getElementById('dlgExport').showModal(); }
+document.getElementById('export').onclick = showExport;
+document.getElementById('copy').onclick = async () => {
+  const t = document.getElementById('csv');
+  try{ await navigator.clipboard.writeText(t.value); }catch(e){ t.select(); document.execCommand('copy'); }
+  document.getElementById('copy').textContent='Copied ✓';
+  setTimeout(()=>document.getElementById('copy').textContent='Copy',1500);
+};
+
+function openEdit(p){
+  editing = p;
+  document.getElementById('eName').value = p.name;
+  document.getElementById('eMax').value = p.max;
+  document.getElementById('dlgEdit').showModal();
+}
+document.getElementById('dlgEdit').addEventListener('close', e => {
+  const v = e.target.returnValue, p = editing; if(!p) return;
+  if(v==='save'){
+    p.name = document.getElementById('eName').value.trim() || p.name;
+    p.max = parseInt(document.getElementById('eMax').value) || 200;
+    save(); render(p);
+  }else if(v==='remove'){
+    players.delete(p.id); try{p.device.gatt.disconnect()}catch(_){}
+    p.el.remove();
+  }
+  editing = null;
+});
+
+// Keep the screen awake during practice where supported
+async function wake(){ try{ await navigator.wakeLock?.request('screen'); }catch(e){} }
+wake(); document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') wake(); });
+</script>
+</body>
+</html>
