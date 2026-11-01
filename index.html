@@ -55,7 +55,7 @@
 
 <dialog id="dlgEdit">
   <form method="dialog">
-    <label>Player name<input id="eName"></label>
+    <label>Jersey #<input id="eNum" type="number" inputmode="numeric"></label>
     <label>Max HR (default 200)<input id="eMax" type="number" inputmode="numeric"></label>
     <div class="row"><button value="remove" id="eRemove">Remove</button><button value="cancel">Cancel</button><button class="primary" value="save">Save</button></div>
   </form>
@@ -76,14 +76,39 @@ const players = new Map();                  // device.id -> state
 let session = null;                         // {start, timer}
 let editing = null;
 
-// Saved names/max HR per armband (best effort; storage may be unavailable)
-function loadSaved(){ try{return JSON.parse(localStorage.getItem('hrRoster')||'{}')}catch(e){return {}} }
+// Saved jersey #/max HR per armband. Stored two ways so it survives if the
+// browser hands out a new device ID: by ID, and by the armband's Bluetooth name.
+function loadRoster(){
+  try{ return JSON.parse(localStorage.getItem('hrRoster2')) || {ids:{},names:{}} }
+  catch(e){ return {ids:{},names:{}} }
+}
+function lookup(device){
+  const r = loadRoster();
+  if(r.ids[device.id]) return r.ids[device.id];
+  const byName = device.name && r.names[device.name];
+  return byName || {};   // null = name shared by 2+ armbands, can't trust it
+}
 function save(){
   try{
-    const o = loadSaved();
-    players.forEach((p,id)=>{ o[id]={name:p.name,max:p.max} });
-    localStorage.setItem('hrRoster', JSON.stringify(o));
+    const r = loadRoster();
+    players.forEach(p => {
+      const rec = {num:p.num, max:p.max};
+      r.ids[p.id] = rec;
+      const n = p.device.name;
+      if(n){
+        const prev = r.names[n];
+        // If two different armbands share a Bluetooth name, stop using name matching for it
+        r.names[n] = (prev === null || (prev && prev.id && prev.id !== p.id)) ? null : {...rec, id:p.id};
+      }
+    });
+    localStorage.setItem('hrRoster2', JSON.stringify(r));
   }catch(e){}
+}
+function label(p){ return p.num ? '#'+p.num : (p.device.name || 'Armband'); }
+function sortTiles(){
+  const g = document.getElementById('grid');
+  [...players.values()].sort((a,b)=>(parseInt(a.num)||999)-(parseInt(b.num)||999))
+    .forEach(p => p.el && g.appendChild(p.el));
 }
 
 function zoneOf(bpm,max){ const r=bpm/max; let z=0; ZONES.forEach(b=>{ if(r>=b) z++ }); return z; }
@@ -98,14 +123,14 @@ document.getElementById('add').onclick = async () => {
   try{
     const device = await navigator.bluetooth.requestDevice({ filters:[{ services:['heart_rate'] }] });
     if(players.has(device.id)){ connect(players.get(device.id)); return; }
-    const saved = loadSaved()[device.id] || {};
-    const p = { id:device.id, device, name: saved.name || device.name || 'Player', max: saved.max || 200,
+    const saved = lookup(device);
+    const p = { id:device.id, device, num: saved.num || '', max: saved.max || 200,
                 bpm:null, last:0, peak:0, sum:0, n:0, zoneSec:[0,0,0,0,0], el:null };
     players.set(device.id, p);
     device.addEventListener('gattserverdisconnected', () => { p.connected=false; render(p); setTimeout(()=>connect(p), 1500); });
-    makeTile(p);
+    makeTile(p); sortTiles();
     await connect(p);
-    if(!saved.name) openEdit(p);   // name them right away the first time
+    if(!saved.num) openEdit(p);   // set the jersey # right away the first time
   }catch(e){ if(e.name!=='NotFoundError') alert('Could not connect: '+e.message); }
 };
 
@@ -138,7 +163,7 @@ function render(p){
   if(!p.el) return;
   const fresh = p.connected && Date.now()-p.last < 5000 && p.bpm;
   p.el.classList.toggle('lost', !fresh);
-  p.el.querySelector('.name').textContent = p.name;
+  p.el.querySelector('.name').textContent = label(p);
   p.el.querySelector('.bpm').firstChild.textContent = fresh ? p.bpm : '--';
   const z = fresh ? zoneOf(p.bpm,p.max) : 0;
   p.el.style.borderLeftColor = `var(${ZCOL[z]})`;
@@ -177,8 +202,8 @@ document.getElementById('rec').onclick = e => {
 function mmss(s){ return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
 function buildCSV(){
   const date = new Date().toLocaleDateString();
-  const rows = [['Date','Player','Avg HR','Peak HR','Max HR set','Min <60%','Min 60-70%','Min 70-80%','Min 80-90%','Min 90%+']];
-  players.forEach(p => rows.push([date, p.name, p.n?Math.round(p.sum/p.n):'', p.peak||'', p.max, ...p.zoneSec.map(s=>(s/60).toFixed(1))]));
+  const rows = [['Date','Jersey #','Avg HR','Peak HR','Max HR set','Min <60%','Min 60-70%','Min 70-80%','Min 80-90%','Min 90%+']];
+  players.forEach(p => rows.push([date, label(p), p.n?Math.round(p.sum/p.n):'', p.peak||'', p.max, ...p.zoneSec.map(s=>(s/60).toFixed(1))]));
   return rows.map(r=>r.map(c=>/[",]/.test(c)?`"${String(c).replace(/"/g,'""')}"`:c).join(',')).join('\n');
 }
 function showExport(){ document.getElementById('csv').value = buildCSV(); document.getElementById('dlgExport').showModal(); }
@@ -192,16 +217,16 @@ document.getElementById('copy').onclick = async () => {
 
 function openEdit(p){
   editing = p;
-  document.getElementById('eName').value = p.name;
+  document.getElementById('eNum').value = p.num;
   document.getElementById('eMax').value = p.max;
   document.getElementById('dlgEdit').showModal();
 }
 document.getElementById('dlgEdit').addEventListener('close', e => {
   const v = e.target.returnValue, p = editing; if(!p) return;
   if(v==='save'){
-    p.name = document.getElementById('eName').value.trim() || p.name;
+    p.num = document.getElementById('eNum').value.trim() || p.num;
     p.max = parseInt(document.getElementById('eMax').value) || 200;
-    save(); render(p);
+    save(); render(p); sortTiles();
   }else if(v==='remove'){
     players.delete(p.id); try{p.device.gatt.disconnect()}catch(_){}
     p.el.remove();
