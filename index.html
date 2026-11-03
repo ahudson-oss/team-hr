@@ -31,7 +31,14 @@
   dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:14px;width:min(420px,92vw)}
   dialog input,dialog textarea{width:100%;font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin:6px 0 12px;-webkit-user-select:text;user-select:text}
   dialog textarea{height:200px;font-size:12px}
-  .row{display:flex;gap:8px;justify-content:flex-end}
+  .row{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+  #sumTable{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  #sumTable th{text-align:left;color:var(--muted);font-size:13px;font-weight:600;padding:6px 4px;border-bottom:1px solid var(--line)}
+  #sumTable td{padding:8px 4px;border-bottom:1px solid var(--line)}
+  #sumTable td.num{font-weight:800;font-size:18px}
+  #sumTable td.hard{font-weight:700}
+  .zbar{display:flex;height:14px;border-radius:4px;overflow:hidden;min-width:120px;background:var(--line)}
+  .zbar span{display:block;height:100%}
 </style>
 </head>
 <body>
@@ -46,11 +53,11 @@
 <div id="grid"><div class="empty">Tap <b>+ Add armband</b>, then pick a Coospo from the list. One tap per player.<br><br>Players' armbands must <b>not</b> be connected to their own phone or the Coospo app — each armband allows only one Bluetooth connection.</div></div>
 
 <div class="legend">
-  <span style="--c:var(--z1)">&lt;60% easy</span>
-  <span style="--c:var(--z2)">60–70%</span>
-  <span style="--c:var(--z3)">70–80%</span>
-  <span style="--c:var(--z4)">80–90%</span>
-  <span style="--c:var(--z5)">90%+ max</span>
+  <span style="--c:var(--z1)">Easy &lt;60%</span>
+  <span style="--c:var(--z2)">Light 60–70%</span>
+  <span style="--c:var(--z3)">Moderate 70–80%</span>
+  <span style="--c:var(--z4)">Hard 80–90%</span>
+  <span style="--c:var(--z5)">Max 90%+</span>
 </div>
 
 <dialog id="dlgEdit">
@@ -61,11 +68,14 @@
   </form>
 </dialog>
 
-<dialog id="dlgExport">
+<dialog id="dlgExport" style="width:min(640px,94vw)">
   <form method="dialog">
-    <p style="margin-top:0">Session summary (CSV). Copy it and paste into Google Sheets.</p>
-    <textarea id="csv" readonly></textarea>
-    <div class="row"><button type="button" id="copy">Copy</button><button class="primary" value="close">Done</button></div>
+    <h2 style="margin:0 0 4px;font-size:20px">Session summary</h2>
+    <p id="sumMeta" style="margin:0 0 12px;color:var(--muted)"></p>
+    <table id="sumTable"></table>
+    <p style="color:var(--muted);font-size:13px;margin:12px 0">Sorted by hard minutes (80%+ of max HR). Bar = share of time in each zone.</p>
+    <textarea id="csv" readonly style="display:none"></textarea>
+    <div class="row"><button type="button" id="download">Download CSV</button><button type="button" id="copy">Copy for Sheets</button><button class="primary" value="close">Done</button></div>
   </form>
 </dialog>
 
@@ -216,22 +226,50 @@ document.getElementById('rec').onclick = () => {
     session = { start: Date.now() };
     setRecButton(true);
   }else{
+    lastLen = sessionMin();
     showExport(); session = null;   // stats stay in memory so Export still works
     setRecButton(false);
   }
   persistSession();
 };
 
-function mmss(s){ return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+const ZNAMES = ['Easy','Light','Moderate','Hard','Max'];
+let lastLen = 0;   // session length in minutes, kept after the session ends
+function sessionMin(){ return session ? (Date.now()-session.start)/60000 : lastLen; }
+function summaryRows(){
+  return Object.entries(stats).filter(([,s])=>s.n).map(([k,s]) => {
+    const min = s.zoneSec.map(x=>x/60);
+    return { k, avg:Math.round(s.sum/s.n), peak:s.peak, peakPct:Math.round(100*s.peak/s.max),
+             max:s.max, min, hard:min[3]+min[4], total:s.n/60 };
+  }).sort((a,b)=>b.hard-a.hard);
+}
 function buildCSV(){
   const date = new Date().toLocaleDateString();
-  const rows = [['Date','Jersey #','Avg HR','Peak HR','Max HR set','Min <60%','Min 60-70%','Min 70-80%','Min 80-90%','Min 90%+']];
-  Object.entries(stats)
-    .sort((a,b)=>(parseInt(a[0].slice(1))||999)-(parseInt(b[0].slice(1))||999))
-    .forEach(([k,s]) => rows.push([date, k, s.n?Math.round(s.sum/s.n):'', s.peak||'', s.max, ...s.zoneSec.map(x=>(x/60).toFixed(1))]));
+  const len = Math.round(sessionMin());
+  const rows = [['Date','Session min','Jersey #','Avg HR','Peak HR','Peak % of max','Hard min (80%+)',
+                 'Easy min (<60%)','Light min (60-70%)','Moderate min (70-80%)','Hard min (80-90%)','Max min (90%+)','Max HR set']];
+  summaryRows().forEach(r => rows.push([date, len, r.k, r.avg, r.peak, r.peakPct, r.hard.toFixed(1), ...r.min.map(x=>x.toFixed(1)), r.max]));
   return rows.map(r=>r.map(c=>/[",]/.test(c)?`"${String(c).replace(/"/g,'""')}"`:c).join(',')).join('\n');
 }
-function showExport(){ document.getElementById('csv').value = buildCSV(); document.getElementById('dlgExport').showModal(); }
+function showExport(){
+  const rows = summaryRows();
+  document.getElementById('sumMeta').textContent =
+    `${new Date().toLocaleDateString()} · ${Math.round(sessionMin())} min · ${rows.length} player${rows.length===1?'':'s'}`;
+  document.getElementById('sumTable').innerHTML = rows.length ?
+    '<tr><th>#</th><th>Avg</th><th>Peak</th><th>Hard min</th><th>Zones</th></tr>' +
+    rows.map(r => `<tr><td class="num">${r.k}</td><td>${r.avg}</td><td>${r.peak} <small style="color:var(--muted)">${r.peakPct}%</small></td>
+      <td class="hard">${r.hard.toFixed(1)}</td>
+      <td><div class="zbar">${r.min.map((m,i)=>`<span title="${ZNAMES[i]} ${m.toFixed(1)} min" style="width:${100*m/r.total}%;background:var(${ZCOL[i]})"></span>`).join('')}</div></td></tr>`).join('')
+    : '<tr><td style="color:var(--muted)">No heart rate data recorded this session.</td></tr>';
+  document.getElementById('csv').value = buildCSV();
+  document.getElementById('dlgExport').showModal();
+}
+document.getElementById('download').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([buildCSV()], {type:'text/csv'}));
+  a.download = `team-hr-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+};
 document.getElementById('export').onclick = showExport;
 document.getElementById('copy').onclick = async () => {
   const t = document.getElementById('csv');
