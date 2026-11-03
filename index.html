@@ -125,7 +125,7 @@ document.getElementById('add').onclick = async () => {
     if(players.has(device.id)){ connect(players.get(device.id)); return; }
     const saved = lookup(device);
     const p = { id:device.id, device, num: saved.num || '', max: saved.max || 200,
-                bpm:null, last:0, peak:0, sum:0, n:0, zoneSec:[0,0,0,0,0], el:null };
+                bpm:null, last:0, el:null };
     players.set(device.id, p);
     device.addEventListener('gattserverdisconnected', () => { p.connected=false; render(p); setTimeout(()=>connect(p), 1500); });
     makeTile(p); sortTiles();
@@ -168,42 +168,67 @@ function render(p){
   const z = fresh ? zoneOf(p.bpm,p.max) : 0;
   p.el.style.borderLeftColor = `var(${ZCOL[z]})`;
   p.el.querySelector('.pct').textContent = fresh ? Math.round(100*p.bpm/p.max)+'%' : (p.connected?'waiting…':'reconnecting…');
-  p.el.querySelector('.pk').textContent = session ? 'peak '+(p.peak||'--') : '';
+  p.el.querySelector('.pk').textContent = session ? 'peak '+(stats[label(p)]?.peak||'--') : '';
 }
+
+// Session totals, keyed by jersey label. Saved to the iPad every second so a
+// reload or app switch mid-practice doesn't wipe the session.
+let stats = {};
+function st(p){ const k = label(p); return stats[k] ||= {sum:0,n:0,peak:0,zoneSec:[0,0,0,0,0],max:p.max}; }
+function persistSession(){
+  try{
+    if(session) localStorage.setItem('hrSession', JSON.stringify({start:session.start, stats}));
+    else localStorage.removeItem('hrSession');
+  }catch(e){}
+}
+function setRecButton(on){
+  const b = document.getElementById('rec');
+  b.textContent = on ? 'End session' : 'Start session';
+  b.classList.toggle('on', on);
+}
+// Pick back up a session that was running when the page closed (within 4 hours)
+try{
+  const s = JSON.parse(localStorage.getItem('hrSession'));
+  if(s && Date.now()-s.start < 4*3600e3){ session = {start:s.start}; stats = s.stats || {}; setRecButton(true); }
+}catch(e){}
 
 // Once-per-second tick: stale check + session stats
 setInterval(() => {
   players.forEach(p => {
     const fresh = p.connected && Date.now()-p.last < 5000 && p.bpm;
     if(session && fresh){
-      p.sum += p.bpm; p.n++; p.peak = Math.max(p.peak, p.bpm);
-      p.zoneSec[zoneOf(p.bpm,p.max)]++;
+      const s = st(p);
+      s.sum += p.bpm; s.n++; s.peak = Math.max(s.peak, p.bpm); s.max = p.max;
+      s.zoneSec[zoneOf(p.bpm,p.max)]++;
     }
     render(p);
   });
+  persistSession();
   if(session){
     const s = Math.floor((Date.now()-session.start)/1000);
     document.getElementById('clock').textContent = String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
   }
 }, 1000);
 
-document.getElementById('rec').onclick = e => {
-  const b = e.currentTarget;
+document.getElementById('rec').onclick = () => {
   if(!session){
-    players.forEach(p=>{ p.sum=0;p.n=0;p.peak=0;p.zoneSec=[0,0,0,0,0]; });
+    stats = {};
     session = { start: Date.now() };
-    b.textContent='End session'; b.classList.add('on');
+    setRecButton(true);
   }else{
-    session.end = Date.now(); showExport(); session = null;
-    b.textContent='Start session'; b.classList.remove('on');
+    showExport(); session = null;   // stats stay in memory so Export still works
+    setRecButton(false);
   }
+  persistSession();
 };
 
 function mmss(s){ return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
 function buildCSV(){
   const date = new Date().toLocaleDateString();
   const rows = [['Date','Jersey #','Avg HR','Peak HR','Max HR set','Min <60%','Min 60-70%','Min 70-80%','Min 80-90%','Min 90%+']];
-  players.forEach(p => rows.push([date, label(p), p.n?Math.round(p.sum/p.n):'', p.peak||'', p.max, ...p.zoneSec.map(s=>(s/60).toFixed(1))]));
+  Object.entries(stats)
+    .sort((a,b)=>(parseInt(a[0].slice(1))||999)-(parseInt(b[0].slice(1))||999))
+    .forEach(([k,s]) => rows.push([date, k, s.n?Math.round(s.sum/s.n):'', s.peak||'', s.max, ...s.zoneSec.map(x=>(x/60).toFixed(1))]));
   return rows.map(r=>r.map(c=>/[",]/.test(c)?`"${String(c).replace(/"/g,'""')}"`:c).join(',')).join('\n');
 }
 function showExport(){ document.getElementById('csv').value = buildCSV(); document.getElementById('dlgExport').showModal(); }
@@ -236,7 +261,15 @@ document.getElementById('dlgEdit').addEventListener('close', e => {
 
 // Keep the screen awake during practice where supported
 async function wake(){ try{ await navigator.wakeLock?.request('screen'); }catch(e){} }
-wake(); document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') wake(); });
+wake();
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible'){
+    wake();
+    players.forEach(p => connect(p));   // reconnect anything that dropped while away
+  }else{
+    persistSession();
+  }
+});
 </script>
 </body>
 </html>
