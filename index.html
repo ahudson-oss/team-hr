@@ -272,10 +272,18 @@ document.getElementById('download').onclick = () => {
 };
 document.getElementById('export').onclick = showExport;
 document.getElementById('copy').onclick = async () => {
-  const t = document.getElementById('csv');
-  try{ await navigator.clipboard.writeText(t.value); }catch(e){ t.select(); document.execCommand('copy'); }
-  document.getElementById('copy').textContent='Copied ✓';
-  setTimeout(()=>document.getElementById('copy').textContent='Copy',1500);
+  // Tabs instead of commas: Google Sheets splits tab-separated text into columns on paste
+  const tsv = buildCSV().split('\n').map(line =>
+    line.match(/("([^"]|"")*"|[^,]+|(?<=,)(?=,|$)|^(?=,))/g).map(c => c.replace(/^"|"$/g,'').replace(/""/g,'"')).join('\t')
+  ).join('\n');
+  try{ await navigator.clipboard.writeText(tsv); }
+  catch(e){
+    const t = document.createElement('textarea'); t.value = tsv;
+    document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  const btn = document.getElementById('copy');
+  btn.textContent = 'Copied ✓ — paste in cell A1';
+  setTimeout(()=>btn.textContent='Copy for Sheets', 2500);
 };
 
 function openEdit(p){
